@@ -50,8 +50,11 @@ app.use(express.json());
 const io = new Server(server, {
   cors: {
     origin: [
+      "https://mariaalgo.online",
+      "https://www.mariaalgo.online", 
+      "https://api.mariaalgo.online",
       process.env.CLIENT_ORIGIN || "http://localhost:5173",
-      "http://localhost:3000",
+      "http://localhost:5000",
     ],
     methods: ["GET", "POST"],
     credentials: true,
