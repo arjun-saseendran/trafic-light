@@ -13,7 +13,7 @@ const emitLog = (msg, level = "info") => {
 };
 
 const RANGE_LIMIT = 30; // Max points allowed for the 2-candle setup
-const LOT_SIZE = 65;    // Updated SEBI Lot Size
+const LOT_SIZE = 65;    // SEBI Lot Size
 
 function getISTDate() {
   return new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
@@ -118,8 +118,8 @@ export const handleTick = async (spotPrice) => {
 async function manageTrade(spotPrice) {
   const { direction, entryPrice, breakoutHigh, breakoutLow, trailingActive } = tradeState;
 
-  const risk         = breakoutHigh - breakoutLow;
-  const targetPoints = risk * 3; // 1:3 Reward
+  const risk          = breakoutHigh - breakoutLow;
+  const targetPoints  = risk * 3; // 1:3 Reward
   const currentPoints = direction === "CE"
     ? (spotPrice - entryPrice)
     : (entryPrice - spotPrice);
@@ -134,7 +134,7 @@ async function manageTrade(spotPrice) {
       return;
     }
 
-    // TARGET REACHED: Lock profit at 1:3 and hold for 3:21 PM
+    // TARGET REACHED: Lock profit at 1:3 and hold until 3:21 PM or trail hit
     if (currentPoints >= targetPoints) {
       tradeState.trailingActive = true;
       tradeState.trailSL = direction === "CE"
@@ -159,31 +159,53 @@ async function manageTrade(spotPrice) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 4. ENTER TRADE
+// ✅ FIX (Bug 2): State is only committed AFTER placeOrder succeeds.
+//    Previously tradeTakenToday/tradeActive were set before the order,
+//    so a thrown error left state corrupted — no position open but
+//    no new entry possible for the rest of the day.
 // ─────────────────────────────────────────────────────────────────────────────
 async function enterTrade(direction, spotPrice) {
   const symbol = getOptionSymbol(direction, spotPrice);
+
+  emitLog(`🚀 Entering ${direction} at ${spotPrice} | Symbol: ${symbol}`, "success");
+
   try {
-    emitLog(`🚀 Entering ${direction} at ${spotPrice}`, "success");
+    const orderRes = await placeOrder({ symbol, qty: LOT_SIZE, side: 1 });
+
+    // ✅ Only commit state AFTER order is placed without throwing
+    tradeState.tradeTakenToday = true;
+    tradeState.tradeActive     = true;
+    tradeState.direction       = direction;
+    tradeState.entryPrice      = spotPrice;
+    tradeState.optionSymbol    = symbol;
+    tradeState.exitReason      = null;
+
+    // Persist to DB so state survives server restart
     await DailyStatus.findOneAndUpdate(
       { date: getTodayString() },
       { tradeTakenToday: true },
       { upsert: true }
     );
 
-    tradeState.tradeTakenToday = true;
-    tradeState.tradeActive     = true;
-    tradeState.direction       = direction;
-    tradeState.entryPrice      = spotPrice;
-    tradeState.optionSymbol    = symbol;
-    tradeState.exitReason      = "---"; // Reset reason for new trade
-
-    await placeOrder({ symbol, qty: LOT_SIZE, side: 1 });
-
     // 🔔 TELEGRAM: Notify Entry
-    sendTrafficAlert(`🚀 <b>Trade Entered</b>\nSide: ${direction}\nEntry Spot: ${spotPrice}\nStrike: ${symbol}`);
+    sendTrafficAlert(
+      `🚀 <b>Trade Entered</b>\n` +
+      `Side: ${direction}\n` +
+      `Entry Spot: ${spotPrice}\n` +
+      `Strike: ${symbol}\n` +
+      `Order ID: ${orderRes?.id ?? "PAPER"}`
+    );
 
   } catch (err) {
-    emitLog(`❌ Execution Error: ${err.message}`, "error");
+    // ✅ State is NOT set — strategy will retry entry on next tick
+    emitLog(`❌ Entry Order Failed: ${err.message} — state NOT committed, will retry`, "error");
+    sendTrafficAlert(
+      `🚨 <b>Entry Order Failed</b>\n` +
+      `Side: ${direction}\n` +
+      `Symbol: ${symbol}\n` +
+      `Error: ${err.message}\n` +
+      `⚠️ Will retry on next tick`
+    );
   }
 }
 
@@ -193,13 +215,14 @@ async function enterTrade(direction, spotPrice) {
 async function exitTrade(exitSpotPrice, reason = "Manual Exit") {
   if (!tradeState.tradeActive) return;
 
-  tradeState.exitReason = reason;
+  // Mark inactive immediately to prevent re-entry on concurrent ticks
+  tradeState.tradeActive = false;
+  tradeState.exitReason  = reason;
 
   // Place the exit (SELL) order and capture the order ID
   const exitOrder = await placeOrder({ symbol: tradeState.optionSymbol, qty: LOT_SIZE, side: -1 });
 
   // Poll Fyers order status every 500ms until confirmed filled (max 10s)
-  // Only then fetch position PnL — avoids reading stale open position data
   const filled = await waitForOrderFill(exitOrder?.id);
   if (!filled) {
     emitLog(`⚠️ Exit order ${exitOrder?.id} fill not confirmed. PnL may fall back to estimate.`, "warn");
@@ -234,8 +257,8 @@ async function exitTrade(exitSpotPrice, reason = "Manual Exit") {
 
   // ── Classify exit reason ─────────────────────────────────────────────────
   let exitCategory = "MANUAL_CLOSE";
-  if (reason.includes("Stoploss"))                      exitCategory = "STOP_LOSS_HIT";
-  if (reason.includes("Profit") || reason.includes("3:21 PM")) exitCategory = "PROFIT_TARGET";
+  if (reason.includes("Stoploss"))                           exitCategory = "STOP_LOSS_HIT";
+  if (reason.includes("Profit") || reason.includes("3:21")) exitCategory = "PROFIT_TARGET";
 
   // ── Save to DB ────────────────────────────────────────────────────────────
   try {
@@ -249,7 +272,9 @@ async function exitTrade(exitSpotPrice, reason = "Manual Exit") {
         `Range: ${(tradeState.breakoutHigh - tradeState.breakoutLow).toFixed(2)}`,
         `Final PnL: ₹${realizedPnL.toFixed(2)}`,
         `PnL Source: ${pnlSource}`,
-        posData ? `Buy Avg: ${posData.buyAvg} | Sell Avg: ${posData.sellAvg}` : `Entry Spot: ${tradeState.entryPrice} | Exit Spot: ${exitSpotPrice}`,
+        posData
+          ? `Buy Avg: ${posData.buyAvg} | Sell Avg: ${posData.sellAvg}`
+          : `Entry Spot: ${tradeState.entryPrice} | Exit Spot: ${exitSpotPrice}`,
       ].join(" | "),
     });
     emitLog(`💾 Trade archived to DB (${pnlSource})`, "info");
@@ -266,29 +291,43 @@ async function exitTrade(exitSpotPrice, reason = "Manual Exit") {
     `Source: ${pnlSource}`
   );
 
-  tradeState.tradeActive = false;
   emitLog(`🏁 Trade Complete: ${reason}`, "success");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 6. OPTION SYMBOL BUILDER
+// ✅ FIX (Bug 1): If today is Tuesday but market is already closed (after 15:30),
+//    the expired contract was being selected. Now rolls forward to next Tuesday.
 // ─────────────────────────────────────────────────────────────────────────────
 function getOptionSymbol(direction, spotPrice) {
   const strike = Math.round(spotPrice / 50) * 50;
   const d = getISTDate();
 
-  // Targeting Tuesday Expiry
-  const daysToTuesday = (2 + 7 - d.getDay()) % 7;
+  // Days until next Tuesday (day=2)
+  let daysToTuesday = (2 + 7 - d.getDay()) % 7;
+
+  // ✅ FIX: If today IS Tuesday (daysToTuesday === 0) but market is closed
+  //         (after 15:30 IST), this expiry is already expired — use next week
+  if (daysToTuesday === 0) {
+    const minsNow = d.getHours() * 60 + d.getMinutes();
+    if (minsNow >= 15 * 60 + 30) {
+      daysToTuesday = 7;
+      emitLog("⚠️ Tuesday expiry already expired — rolling to next week", "warn");
+    }
+  }
+
   d.setDate(d.getDate() + daysToTuesday);
 
   const year     = d.getFullYear().toString().slice(-2);
   const monthNum = d.getMonth() + 1;
-  // Fyers weekly format: single-digit for 1–9, O=Oct, N=Nov, D=Dec
-  const month    = monthNum <= 9 ? String(monthNum)
-                 : monthNum === 10 ? 'O'
-                 : monthNum === 11 ? 'N'
-                 : 'D';
+  // Fyers weekly format: single-digit 1–9, O=Oct, N=Nov, D=Dec
+  const month    = monthNum <= 9  ? String(monthNum)
+                 : monthNum === 10 ? "O"
+                 : monthNum === 11 ? "N"
+                 : "D";
   const day = d.getDate().toString().padStart(2, "0");
 
-  return `NSE:NIFTY${year}${month}${day}${strike}${direction}`;
+  const symbol = `NSE:NIFTY${year}${month}${day}${strike}${direction}`;
+  emitLog(`📋 Option Symbol Built: ${symbol}`, "info");
+  return symbol;
 }
