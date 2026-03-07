@@ -32,15 +32,18 @@ let lastTLLTP = 0;
 app.use(
   cors({
     origin: [
-      process.env.CLIENT_ORIGIN ||
-        "http://localhost:5173" ||
-        "http://localhost:3000",
+      "https://mariaalgo.online",
+      "https://www.mariaalgo.online",
+      "https://api.mariaalgo.online",
+      process.env.CLIENT_ORIGIN || "http://localhost:5173",
+      "http://localhost:3000",
     ],
     credentials: true,
     methods: ["GET", "POST", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
   }),
 );
+
 app.use(express.json());
 
 // ─── Socket.IO ────────────────────────────────────────────────────────────────
