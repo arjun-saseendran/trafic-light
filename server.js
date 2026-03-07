@@ -34,7 +34,7 @@ app.use(
     origin: [
       process.env.CLIENT_ORIGIN ||
         "http://localhost:5173" ||
-        "http://localhost:5000",
+        "http://localhost:3000",
     ],
     credentials: true,
     methods: ["GET", "POST", "OPTIONS"],
@@ -48,7 +48,7 @@ const io = new Server(server, {
   cors: {
     origin: [
       process.env.CLIENT_ORIGIN || "http://localhost:5173",
-      "http://localhost:5000",
+      "http://localhost:3000",
     ],
     methods: ["GET", "POST"],
     credentials: true,
