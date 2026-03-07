@@ -111,7 +111,10 @@ async function generateFyersToken() {
     if (!res4.data?.Url) throw new Error("Step 4 Failed: Redirect URL missing.");
     
     const authCode = extractAuthCode(res4.data.Url);
-    const fyers = new FyersAPI();
+    
+    // 🚨 CHANGED: Disable log file creation right here
+    const fyers = new FyersAPI({ enableLogging: false });
+    
     fyers.setAppId(FYERS_APP_ID);
     fyers.setRedirectUrl(FYERS_REDIRECT_URI);
 
