@@ -14,23 +14,12 @@ const {
     FYERS_TOTP_SECRET,
 } = process.env;
 
-// ─── Validate ENV ────────────────────────────────────────────────────────────
 function validateEnv() {
-    const required = [
-        "FYERS_APP_ID",
-        "FYERS_SECRET_ID",
-        "FYERS_REDIRECT_URI",
-        "FYERS_FY_ID",
-        "FYERS_PIN",
-        "FYERS_TOTP_SECRET",
-    ];
+    const required = ["FYERS_APP_ID","FYERS_SECRET_ID","FYERS_REDIRECT_URI","FYERS_FY_ID","FYERS_PIN","FYERS_TOTP_SECRET"];
     const missing = required.filter((k) => !process.env[k]);
-    if (missing.length) {
-        throw new Error(`Missing required env vars: ${missing.join(", ")}`);
-    }
+    if (missing.length) throw new Error(`Missing required env vars: ${missing.join(", ")}`);
 }
 
-// ─── Native TOTP (RFC 6238) ──────────────────────────────────────────────────
 function base32Decode(base32) {
     const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
     const clean = base32.replace(/[^A-Z2-7]/gi, "").toUpperCase();
@@ -41,9 +30,7 @@ function base32Decode(base32) {
         bits += val.toString(2).padStart(5, "0");
     }
     const bytes = [];
-    for (let i = 0; i + 8 <= bits.length; i += 8) {
-        bytes.push(parseInt(bits.slice(i, i + 8), 2));
-    }
+    for (let i = 0; i + 8 <= bits.length; i += 8) bytes.push(parseInt(bits.slice(i, i + 8), 2));
     return Buffer.from(bytes);
 }
 
@@ -74,29 +61,31 @@ function extractAuthCode(url) {
     throw new Error(`auth_code not found in redirect URL: ${url}`);
 }
 
-// ─── Main ─────────────────────────────────────────────────────────────────────
 async function generateFyersToken() {
-    console.log("🤖 Starting Fyers V3 Headless Login...");
+    console.log("🤖 Starting Fyers headless login...");
     validateEnv();
 
-    const res1 = await axios.post("https://api-t2.fyers.in/vagator/v2/send_login_otp_v2", { 
-        fy_id: Buffer.from(FYERS_FY_ID).toString("base64"), app_id: "2" 
+    const res1 = await axios.post("https://api-t2.fyers.in/vagator/v2/send_login_otp_v2", {
+        fy_id: Buffer.from(FYERS_FY_ID).toString("base64"), app_id: "2"
     });
     if (res1.data.s !== "ok") throw new Error(`Step 1 Failed: ${JSON.stringify(res1.data)}`);
     let requestKey = res1.data.request_key;
+    console.log("✅ Step 1 — OTP sent");
 
     const currentTotp = generateTotp(FYERS_TOTP_SECRET);
-    const res2 = await axios.post("https://api-t2.fyers.in/vagator/v2/verify_otp", { 
-        request_key: requestKey, otp: currentTotp 
+    const res2 = await axios.post("https://api-t2.fyers.in/vagator/v2/verify_otp", {
+        request_key: requestKey, otp: currentTotp
     });
     if (res2.data.s !== "ok") throw new Error(`Step 2 Failed: ${JSON.stringify(res2.data)}`);
     requestKey = res2.data.request_key;
+    console.log("✅ Step 2 — TOTP verified");
 
     const res3 = await axios.post("https://api-t2.fyers.in/vagator/v2/verify_pin_v2", {
         request_key: requestKey, identity_type: "pin", identifier: hashPin(FYERS_PIN),
     });
     if (res3.data.s !== "ok") throw new Error(`Step 3 Failed: ${JSON.stringify(res3.data)}`);
     const ssoToken = res3.data.data?.access_token;
+    console.log("✅ Step 3 — PIN verified");
 
     const appIdPrefix = FYERS_APP_ID.includes("-") ? FYERS_APP_ID.split("-")[0] : FYERS_APP_ID;
     const res4 = await axios.post("https://api-t1.fyers.in/api/v3/token", {
@@ -108,13 +97,20 @@ async function generateFyersToken() {
         validateStatus: (status) => status === 200 || status === 308,
     });
 
-    if (!res4.data?.Url) throw new Error("Step 4 Failed: Redirect URL missing.");
-    
-    const authCode = extractAuthCode(res4.data.Url);
-    
-    // 🚨 CHANGED: Disable log file creation right here
+    if (res4.data?.s !== "ok") throw new Error(`Step 4 Failed: ${JSON.stringify(res4.data)}`);
+
+    let authCode;
+    if (res4.data?.Url) {
+        authCode = extractAuthCode(res4.data.Url);
+        console.log("✅ Step 4 — auth_code received");
+    } else if (res4.data?.data?.auth) {
+        authCode = res4.data.data.auth;
+        console.log("✅ Step 4 — auth token received (new app flow)");
+    } else {
+        throw new Error("Step 4 Failed: Neither Url nor auth found in response.");
+    }
+
     const fyers = new FyersAPI({ enableLogging: false });
-    
     fyers.setAppId(FYERS_APP_ID);
     fyers.setRedirectUrl(FYERS_REDIRECT_URI);
 
@@ -124,12 +120,12 @@ async function generateFyersToken() {
 
     if (tokenResponse.s !== "ok") throw new Error(`Step 5 Failed: ${JSON.stringify(tokenResponse)}`);
 
-    console.log("✅ Access token retrieved successfully!");
+    console.log("✅ Step 5 — access token generated");
     updateEnvFile("FYERS_ACCESS_TOKEN", tokenResponse.access_token);
+    console.log("🎉 Fyers login complete. Token saved to .env.");
     return tokenResponse.access_token;
 }
 
-// ─── Helper to update .env ────────────────────────────────────────────────────
 function updateEnvFile(key, value) {
     const envPath = path.resolve(process.cwd(), ".env");
     let envData = fs.existsSync(envPath) ? fs.readFileSync(envPath, "utf8") : "";
@@ -137,10 +133,10 @@ function updateEnvFile(key, value) {
     const newLine = `${key}="${value}"`;
     envData = regex.test(envData) ? envData.replace(regex, newLine) : envData + (envData.endsWith("\n") ? "" : "\n") + newLine + "\n";
     fs.writeFileSync(envPath, envData, "utf8");
-    console.log(`💾 ${key} saved to .env file.`);
+    console.log(`💾 FYERS_ACCESS_TOKEN saved to .env`);
 }
 
 generateFyersToken().catch((error) => {
-    console.error(error.message);
+    console.error("❌ Login failed:", error.message);
     process.exit(1);
 });
