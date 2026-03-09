@@ -13,6 +13,9 @@ export const tradeState = {
   // field was never declared here. Reading an undeclared property returns undefined
   // which caused /api/traffic/status to always return exitReason: null even after exit.
   exitReason:      null,
+  // ✅ FIX (Bug 3): Synchronous lock set BEFORE await placeOrder() to prevent
+  // duplicate orders when multiple ticks fire during the async entry gap.
+  entryInFlight:   false,
 };
 
 // ========================
@@ -31,6 +34,7 @@ export const resetDailyState = () => {
   tradeState.candles         = [];
   tradeState.optionSymbol    = null;
   tradeState.exitReason      = null; // ✅ FIX: also clear on daily reset
+  tradeState.entryInFlight   = false; // ✅ FIX (Bug 3): always reset lock for new day
   console.log("🧹 Trade state reset for the new day.");
 };
 

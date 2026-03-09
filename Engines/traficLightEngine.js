@@ -88,6 +88,9 @@ export const handleNewCandle = (candle) => {
 export const handleTick = async (spotPrice) => {
   const now = getISTDate();
 
+  // Safety: ensure entryInFlight exists on state (backward compat with old state objects)
+  if (tradeState.entryInFlight === undefined) tradeState.entryInFlight = false;
+
   // RULE: Hard exit at 3:21 PM
   if (now.getHours() === 15 && now.getMinutes() >= 21) {
     if (tradeState.tradeActive) {
@@ -163,8 +166,19 @@ async function manageTrade(spotPrice) {
 //    Previously tradeTakenToday/tradeActive were set before the order,
 //    so a thrown error left state corrupted — no position open but
 //    no new entry possible for the rest of the day.
+// ✅ FIX (Bug 3): In-flight lock prevents duplicate orders fired by concurrent
+//    ticks arriving during the async placeOrder gap. Without this, multiple
+//    ticks all pass the !tradeTakenToday && !tradeActive check before any
+//    single tick has a chance to set those flags post-await — causing 2 lots.
 // ─────────────────────────────────────────────────────────────────────────────
 async function enterTrade(direction, spotPrice) {
+  // ✅ Guard: if an order is already in-flight, bail immediately
+  if (tradeState.entryInFlight) {
+    emitLog("⏳ Entry already in-flight, skipping duplicate tick", "warn");
+    return;
+  }
+  tradeState.entryInFlight = true;   // 🔒 Lock BEFORE the await
+
   const symbol = getOptionSymbol(direction, spotPrice);
 
   emitLog(`🚀 Entering ${direction} at ${spotPrice} | Symbol: ${symbol}`, "success");
@@ -175,6 +189,7 @@ async function enterTrade(direction, spotPrice) {
     // ✅ Only commit state AFTER order is placed without throwing
     tradeState.tradeTakenToday = true;
     tradeState.tradeActive     = true;
+    tradeState.entryInFlight   = false;  // 🔓 Unlock (no retry needed, trade is live)
     tradeState.direction       = direction;
     tradeState.entryPrice      = spotPrice;
     tradeState.optionSymbol    = symbol;
@@ -198,6 +213,7 @@ async function enterTrade(direction, spotPrice) {
 
   } catch (err) {
     // ✅ State is NOT set — strategy will retry entry on next tick
+    tradeState.entryInFlight = false;  // 🔓 Unlock so next tick can retry
     emitLog(`❌ Entry Order Failed: ${err.message} — state NOT committed, will retry`, "error");
     sendTrafficAlert(
       `🚨 <b>Entry Order Failed</b>\n` +
