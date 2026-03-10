@@ -21,9 +21,10 @@ export const connectDatabases = async () => {
     process.exit(1);
   }
 
-  mongoose.connection.on("disconnected", () =>
-    console.warn("⚠️  MongoDB disconnected!")
-  );
+  mongoose.connection.on("disconnected", () => {
+    console.warn("⚠️  MongoDB disconnected! Retrying in 5s...");
+    setTimeout(() => mongoose.connect(uri).catch(err => console.error("❌ MongoDB reconnect failed:", err.message)), 5000);
+  });
   mongoose.connection.on("error", (err) =>
     console.error("❌ MongoDB error:", err.message)
   );

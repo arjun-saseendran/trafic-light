@@ -230,10 +230,18 @@ async function enterTrade(direction, spotPrice) {
 // ─────────────────────────────────────────────────────────────────────────────
 async function exitTrade(exitSpotPrice, reason = "Manual Exit") {
   if (!tradeState.tradeActive) return;
+  // ✅ FIX: exitInFlight lock prevents duplicate exit orders when concurrent
+  // ticks both pass the tradeActive check before either reaches the await below
+  if (tradeState.exitInFlight) {
+    emitLog("⏳ Exit already in-flight, skipping duplicate tick", "warn");
+    return;
+  }
+  tradeState.exitInFlight = true;  // 🔒 Lock BEFORE the await
 
   // Mark inactive immediately to prevent re-entry on concurrent ticks
-  tradeState.tradeActive = false;
-  tradeState.exitReason  = reason;
+  tradeState.tradeActive     = false;
+  tradeState.tradeTakenToday = true;  // ✅ FIX: prevent second entry after exit — one trade per day
+  tradeState.exitReason      = reason;
 
   // Place the exit (SELL) order and capture the order ID
   const exitOrder = await placeOrder({ symbol: tradeState.optionSymbol, qty: LOT_SIZE, side: -1 });
@@ -308,6 +316,7 @@ async function exitTrade(exitSpotPrice, reason = "Manual Exit") {
   );
 
   emitLog(`🏁 Trade Complete: ${reason}`, "success");
+  tradeState.exitInFlight = false;  // 🔓 Unlock after exit complete
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

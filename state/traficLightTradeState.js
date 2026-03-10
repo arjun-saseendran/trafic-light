@@ -16,6 +16,8 @@ export const tradeState = {
   // ✅ FIX (Bug 3): Synchronous lock set BEFORE await placeOrder() to prevent
   // duplicate orders when multiple ticks fire during the async entry gap.
   entryInFlight:   false,
+  // ✅ FIX: exitInFlight lock prevents duplicate exit orders from concurrent ticks
+  exitInFlight:    false,
 };
 
 // ========================
@@ -35,6 +37,7 @@ export const resetDailyState = () => {
   tradeState.optionSymbol    = null;
   tradeState.exitReason      = null; // ✅ FIX: also clear on daily reset
   tradeState.entryInFlight   = false; // ✅ FIX (Bug 3): always reset lock for new day
+  tradeState.exitInFlight    = false; // ✅ FIX: reset exit lock for new day
   console.log("🧹 Trade state reset for the new day.");
 };
 

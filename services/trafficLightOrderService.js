@@ -30,14 +30,18 @@ export const placeOrder = async ({ symbol, qty, side }) => {
         `Order ID: ${response.id}`
       );
     } else {
+      // ✅ FIX: throw on rejection so enterTrade catch block fires and
+      // entryInFlight is unlocked — previously returned {s:"error"} silently
+      // which left entryInFlight=true forever, blocking all entries for the day
       console.error(`❌ Order Rejected: ${response.message}`);
       await sendTrafficAlert(
         `🚨 <b>Order Rejected</b>\n` +
         `Side: ${sideLabel}\n` +
         `Symbol: ${symbol}\n` +
         `Reason: ${response.message}\n` +
-        `⚠️ Manual intervention required!`
+        `⚠️ Will retry on next tick`
       );
+      throw new Error(response.message);
     }
 
     return response; // response.id is the Fyers order ID
