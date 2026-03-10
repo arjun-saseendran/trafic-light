@@ -186,7 +186,13 @@ async function enterTrade(direction, spotPrice) {
   try {
     const orderRes = await placeOrder({ symbol, qty: LOT_SIZE, side: 1 });
 
-    // ✅ Only commit state AFTER order is placed without throwing
+    // ✅ Confirm entry order is fully filled before committing state
+    const filled = await waitForOrderFill(orderRes?.id);
+    if (!filled && orderRes?.id) {
+      throw new Error(`Entry order ${orderRes.id} fill not confirmed within timeout`);
+    }
+
+    // ✅ Only commit state AFTER order confirmed filled
     tradeState.tradeTakenToday = true;
     tradeState.tradeActive     = true;
     tradeState.entryInFlight   = false;  // 🔓 Unlock (no retry needed, trade is live)
