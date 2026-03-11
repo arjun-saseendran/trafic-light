@@ -14,9 +14,11 @@ export const placeOrder = async ({ symbol, qty, side }) => {
     const response = await fyers.place_order({
       symbol:      symbol,
       qty:         Math.floor(qty),
-      type:        2, // Market
+      type:        2, // Market order — Fyers applies MPP automatically (no extra param needed)
       side:        side,
       productType: "INTRADAY",
+      limitPrice:  0,  // ✅ Required by Fyers API for market orders (confirmed from Fyers docs)
+      stopPrice:   0,  // ✅ Required by Fyers API for market orders (confirmed from Fyers docs)
       validity:    "DAY",
     });
 
