@@ -19,6 +19,7 @@ import { fyersDataSocket } from "fyers-api-v3";
 import { getIO } from "../config/socket.js";
 import { CandleBuilder } from "../services/candleBuilderTraficLight.js";
 import { handleNewCandle, handleTick } from "../Engines/traficLightEngine.js";
+import { sendTelegramAlert as sendTrafficAlert } from "../services/telegramService.js";
 
 // Iron Condor imports REMOVED — Upstox handles those now
 
