@@ -46,8 +46,8 @@ export const initFyersLiveData = async () => {
 
   fyersData.on("connect", () => {
     console.log("✅ Fyers Live Data Connected! Subscribing NIFTY spot for Traffic Light.");
-    // Only subscribe NIFTY spot — Traffic Light only needs this
     fyersData.subscribe([NIFTY_SPOT], false);
+    sendTrafficAlert(`✅ <b>Fyers Feed Connected</b>\nNIFTY spot subscribed — Traffic Light live`);
   });
 
   fyersData.on("message", async (msg) => {
@@ -73,12 +73,16 @@ export const initFyersLiveData = async () => {
     // All other symbols ignored — Iron Condor handled by upstoxLiveData.js
   });
 
-  fyersData.on("error", (err) =>
-    console.error("❌ Fyers Live Data Error:", err)
-  );
-  fyersData.on("close", () =>
-    console.log("⚠️ Fyers Live Data Closed. Auto-reconnecting...")
-  );
+  fyersData.on("error", (err) => {
+    const msg = err?.message || String(err);
+    console.error("❌ Fyers Live Data Error:", msg);
+    sendTrafficAlert(`❌ <b>Fyers Feed Error</b>\n<code>${msg}</code>\n⚠️ Auto-reconnecting...`);
+  });
+
+  fyersData.on("close", () => {
+    console.log("⚠️ Fyers Live Data Closed. Auto-reconnecting...");
+    sendTrafficAlert(`⚠️ <b>Fyers Feed Disconnected</b>\nAuto-reconnecting...`);
+  });
 
   fyersData.connect();
 };
