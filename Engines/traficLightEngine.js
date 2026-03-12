@@ -186,47 +186,48 @@ async function enterTrade(direction, spotPrice) {
   try {
     const orderRes = await placeOrder({ symbol, qty: LOT_SIZE, side: 1 });
 
-    // ✅ Confirm entry order is fully filled before committing state
-    const filled = await waitForOrderFill(orderRes?.id);
-    if (!filled && orderRes?.id) {
-      throw new Error(`Entry order ${orderRes.id} fill not confirmed within timeout`);
-    }
+    // Wait for Fyers to confirm FILLED — returns actual avgPrice
+    // throws if rejected, cancelled, or timeout
+    const { filled, avgPrice } = await waitForOrderFill(orderRes?.id);
 
-    // ✅ Only commit state AFTER order confirmed filled
+    // Save actual filled price from Fyers — not spotPrice
+    const actualEntryPrice = (filled && avgPrice) ? avgPrice : spotPrice;
+
+    // Commit state only after Fyers confirms
     tradeState.tradeTakenToday = true;
     tradeState.tradeActive     = true;
-    tradeState.entryInFlight   = false;  // 🔓 Unlock (no retry needed, trade is live)
+    tradeState.entryInFlight   = false;
     tradeState.direction       = direction;
-    tradeState.entryPrice      = spotPrice;
+    tradeState.entryPrice      = actualEntryPrice;
     tradeState.optionSymbol    = symbol;
     tradeState.exitReason      = null;
 
-    // Persist to DB so state survives server restart
     await DailyStatus.findOneAndUpdate(
       { date: getTodayString() },
       { tradeTakenToday: true },
       { upsert: true }
     );
 
-    // 🔔 TELEGRAM: Notify Entry
     sendTrafficAlert(
       `🚀 <b>Trade Entered</b>\n` +
       `Side: ${direction}\n` +
       `Entry Spot: ${spotPrice}\n` +
+      `Filled Price: ${actualEntryPrice}\n` +
       `Strike: ${symbol}\n` +
       `Order ID: ${orderRes?.id ?? "PAPER"}`
     );
 
   } catch (err) {
-    // ✅ State is NOT set — strategy will retry entry on next tick
-    tradeState.entryInFlight = false;  // 🔓 Unlock so next tick can retry
-    emitLog(`❌ Entry Order Failed: ${err.message} — state NOT committed, will retry`, "error");
+    // Order failed — lock tradeTakenToday, no retry ever, wait for manual intervention
+    tradeState.tradeTakenToday = true;
+    tradeState.entryInFlight   = false;
+    emitLog(`❌ Entry Order Failed: ${err.message} — stopping for the day, manual intervention required`, "error");
     sendTrafficAlert(
-      `🚨 <b>Entry Order Failed</b>\n` +
+      `🚨 <b>Entry Order FAILED</b>\n` +
       `Side: ${direction}\n` +
       `Symbol: ${symbol}\n` +
       `Error: ${err.message}\n` +
-      `⚠️ Will retry on next tick`
+      `⚠️ No retry — check Fyers positions manually`
     );
   }
 }

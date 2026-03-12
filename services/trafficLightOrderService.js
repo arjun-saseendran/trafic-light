@@ -69,11 +69,15 @@ export const placeOrder = async ({ symbol, qty, side }) => {
  * @param {number} maxWaitMs - Max time to wait in ms (default: 10 seconds)
  * @param {number} intervalMs - Poll interval in ms (default: 500ms)
  */
+// Polls Fyers until order is FILLED or REJECTED — returns { filled, avgPrice }
+// filled=true only when Fyers confirms status=2 (fully filled)
+// avgPrice = actual tradedPrice from Fyers — used to save real entry/exit price to DB
+// If rejected, cancelled, or timeout — throws so caller stops immediately
 export const waitForOrderFill = async (orderId, maxWaitMs = 10000, intervalMs = 500) => {
-  if (!orderId) return false; // Paper mode or placement failed
+  if (!orderId) return { filled: false, avgPrice: 0 }; // Paper mode
 
   const isLive = process.env.LIVE_TRADING === "true";
-  if (!isLive) return false;
+  if (!isLive) return { filled: false, avgPrice: 0 };
 
   const deadline = Date.now() + maxWaitMs;
 
@@ -82,29 +86,27 @@ export const waitForOrderFill = async (orderId, maxWaitMs = 10000, intervalMs = 
       const response = await fyers.get_order_history({ id: orderId });
 
       if (response.s === "ok" && response.orderBook?.length) {
-        const order = response.orderBook[0];
-        const status = order.status; // Fyers: 2 = Filled, 5 = Rejected, 1 = Cancelled
+        const order  = response.orderBook[0];
+        const status = order.status; // 2=Filled, 5=Rejected, 1=Cancelled
 
         if (status === 2) {
-          console.log(`✅ Order ${orderId} fully filled at avg price: ${order.tradedPrice}`);
-          return true;
+          const avgPrice = order.tradedPrice || 0;
+          console.log(`✅ Order ${orderId} filled | avgPrice=${avgPrice}`);
+          return { filled: true, avgPrice };
         }
 
         if (status === 5 || status === 1) {
-          console.error(`❌ Order ${orderId} was rejected/cancelled. Status: ${status}`);
-          return false;
+          throw new Error(`Order ${orderId} rejected/cancelled (status=${status})`);
         }
       }
     } catch (err) {
-      console.error(`❌ Order status poll error: ${err.message}`);
+      throw new Error(`Order confirm failed: ${err.message}`);
     }
 
-    // Wait before next poll
     await new Promise((res) => setTimeout(res, intervalMs));
   }
 
-  console.warn(`⚠️ Order ${orderId} did not fill within ${maxWaitMs}ms. Proceeding anyway.`);
-  return false;
+  throw new Error(`Order ${orderId} did not fill within ${maxWaitMs / 1000}s — timeout`);
 };
 
 /**
