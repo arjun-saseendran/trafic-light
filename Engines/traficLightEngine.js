@@ -1,7 +1,7 @@
-import { tradeState, pruneCandles } from "../state/traficLightTradeState.js";
-import { placeOrder, waitForOrderFill, getRealizedPnL } from "../services/trafficLightOrderService.js";
-import { DailyStatus } from "../models/traficLightDailyStatusModel.js";
-import TrafficTradePerformance from "../models/trafficTradePerformanceModel.js";
+import { tradeState, pruneCandles } from "../state/tradeState.js";
+import { placeOrder, waitForOrderFill, getRealizedPnL } from "../services/orderService.js";
+import { DailyStatus } from "../models/dailyStatusModel.js";
+import TrafficTradePerformance from "../models/tradePerformanceModel.js";
 import { sendTrafficAlert } from "../services/telegramService.js";
 
 let _io = null;

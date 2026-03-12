@@ -10,11 +10,11 @@ import { exec } from "child_process";
 import { connectDatabases } from "./config/db.js";
 
 // ─── Models ───────────────────────────────────────────────────────────────────
-import TradePerformance from "./models/trafficTradePerformanceModel.js";
-import { DailyStatus } from "./models/traficLightDailyStatusModel.js";
+import TradePerformance from "./models/tradePerformanceModel.js";
+import { DailyStatus } from "./models/dailyStatusModel.js";
 
 // ─── Services & Strategy ──────────────────────────────────────────────────────
-import { resetDailyState, tradeState } from "./state/traficLightTradeState.js";
+import { resetDailyState, tradeState } from "./state/tradeState.js";
 import { setIO as setTrafficIO } from "./Engines/traficLightEngine.js";
 import { sendTelegramAlert } from "./services/telegramService.js";
 
