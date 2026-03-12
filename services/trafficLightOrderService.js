@@ -41,7 +41,7 @@ export const placeOrder = async ({ symbol, qty, side }) => {
         `Side: ${sideLabel}\n` +
         `Symbol: ${symbol}\n` +
         `Reason: ${response.message}\n` +
-        `⚠️ Will retry on next tick`
+        `⚠️ No retry — check Fyers positions manually`
       );
       throw new Error(response.message);
     }
@@ -55,9 +55,9 @@ export const placeOrder = async ({ symbol, qty, side }) => {
       `Side: ${sideLabel}\n` +
       `Symbol: ${symbol}\n` +
       `Error: ${err.message}\n` +
-      `⚠️ Check position immediately!`
+      `⚠️ Check position immediately — no retry`
     );
-    return { s: "error", id: null };
+    throw err; // throw so engine stops immediately — no silent failure
   }
 };
 

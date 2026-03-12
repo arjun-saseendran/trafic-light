@@ -4,6 +4,7 @@ import http from "http";
 import { Server } from "socket.io";
 import cors from "cors";
 import cron from "node-cron";
+import { exec } from "child_process";
 
 // ─── Config & Routes ──────────────────────────────────────────────────────────
 import { connectDatabases } from "./config/db.js";
@@ -131,6 +132,23 @@ app.get("/status", (req, res) =>
     timestamp: new Date(),
   }),
 );
+
+// ─── Engine Stop (Kill Switch) ────────────────────────────────────────────────
+// Stops the pm2 process immediately — does NOT touch open positions.
+// Open positions must be handled manually in Fyers after stopping.
+app.post("/api/engine/stop", async (_req, res) => {
+  try {
+    await sendTelegramAlert("🔴 <b>Traffic Light Engine STOPPED</b>\nKill switch triggered from dashboard.\n⚠️ Check Fyers positions manually.");
+    res.json({ success: true, message: "Engine stopping..." });
+    setTimeout(() => {
+      exec("pm2 stop trafic-light", (err) => {
+        if (err) console.error("❌ pm2 stop failed:", err.message);
+      });
+    }, 500);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // ─── GLOBAL ERROR HANDLERS ────────────────────────────────────────────────────
 process.on("uncaughtException", async (err) => {

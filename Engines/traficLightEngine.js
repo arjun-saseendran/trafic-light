@@ -250,40 +250,61 @@ async function exitTrade(exitSpotPrice, reason = "Manual Exit") {
   tradeState.tradeTakenToday = true;  // ✅ FIX: prevent second entry after exit — one trade per day
   tradeState.exitReason      = reason;
 
-  // Place the exit (SELL) order and capture the order ID
-  const exitOrder = await placeOrder({ symbol: tradeState.optionSymbol, qty: LOT_SIZE, side: -1 });
-
-  // Poll Fyers order status every 500ms until confirmed filled (max 10s)
-  const filled = await waitForOrderFill(exitOrder?.id);
-  if (!filled) {
-    emitLog(`⚠️ Exit order ${exitOrder?.id} fill not confirmed. PnL may fall back to estimate.`, "warn");
+  // Place exit order → wait Fyers COMPLETE → throw on failure, stop and alert
+  let exitAvgPrice = 0;
+  try {
+    const exitOrder = await placeOrder({ symbol: tradeState.optionSymbol, qty: LOT_SIZE, side: -1 });
+    const { filled, avgPrice } = await waitForOrderFill(exitOrder?.id);
+    exitAvgPrice = avgPrice || 0;
+    emitLog(`✅ Exit confirmed by Fyers | avgPrice=${exitAvgPrice}`, "success");
+  } catch (exitErr) {
+    emitLog(`❌ Exit order FAILED: ${exitErr.message} — stopping, manual intervention required`, "error");
+    await sendTrafficAlert(
+      `🚨 <b>EXIT ORDER FAILED</b>
+` +
+      `Symbol: ${tradeState.optionSymbol}
+` +
+      `Error: ${exitErr.message}
+` +
+      `⚠️ Check Fyers positions manually`
+    );
+    tradeState.exitInFlight = false;
+    return; // stop — do not save DB, do not reset state
   }
 
-  // ── Fetch actual PnL from Fyers ──────────────────────────────────────────
+  // ── Fetch actual PnL from Fyers position data ─────────────────────────────
   const posData = await getRealizedPnL(tradeState.optionSymbol);
 
   let realizedPnL;
   let pnlSource;
 
   if (posData && posData.realizedPnL !== undefined) {
-    // ✅ ACTUAL broker PnL: premium difference × qty, as settled by Fyers
+    // Actual broker PnL from Fyers — most accurate
     realizedPnL = posData.realizedPnL;
     pnlSource   = "FYERS_ACTUAL";
     emitLog(
       `💹 Actual PnL from Fyers → Buy Avg: ${posData.buyAvg} | Sell Avg: ${posData.sellAvg} | PnL: ₹${realizedPnL.toFixed(2)}`,
       "info"
     );
+  } else if (exitAvgPrice && tradeState.entryPrice) {
+    // Fallback: use actual fill prices from order confirmation
+    const points = tradeState.direction === "CE"
+      ? (exitAvgPrice - tradeState.entryPrice)
+      : (tradeState.entryPrice - exitAvgPrice);
+    realizedPnL = points * LOT_SIZE;
+    pnlSource   = "FILL_PRICE";
+    emitLog(
+      `💹 PnL from fill prices → Entry: ${tradeState.entryPrice} | Exit: ${exitAvgPrice} | PnL: ₹${realizedPnL.toFixed(2)}`,
+      "info"
+    );
   } else {
-    // ⚠️ FALLBACK: Spot-based estimate (paper mode or API failure)
+    // Last resort — spot based estimate
     const points = tradeState.direction === "CE"
       ? (exitSpotPrice - tradeState.entryPrice)
       : (tradeState.entryPrice - exitSpotPrice);
     realizedPnL = points * LOT_SIZE;
     pnlSource   = "ESTIMATED_SPOT";
-    emitLog(
-      `⚠️ Could not fetch Fyers position. Using spot-based estimate: ₹${realizedPnL.toFixed(2)}`,
-      "warn"
-    );
+    emitLog(`⚠️ PnL estimated from spot: ₹${realizedPnL.toFixed(2)}`, "warn");
   }
 
   // ── Classify exit reason ─────────────────────────────────────────────────
