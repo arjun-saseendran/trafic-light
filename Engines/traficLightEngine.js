@@ -235,7 +235,7 @@ async function enterTrade(direction, spotPrice) {
 // ─────────────────────────────────────────────────────────────────────────────
 // 5. EXIT TRADE — Uses actual Fyers position data for PnL; falls back to estimate
 // ─────────────────────────────────────────────────────────────────────────────
-async function exitTrade(exitSpotPrice, reason = "Manual Exit") {
+export async function exitTrade(exitSpotPrice, reason = "Manual Exit") {
   if (!tradeState.tradeActive) return;
   // ✅ FIX: exitInFlight lock prevents duplicate exit orders when concurrent
   // ticks both pass the tradeActive check before either reaches the await below

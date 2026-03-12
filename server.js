@@ -138,13 +138,30 @@ app.get("/status", (req, res) =>
 // Open positions must be handled manually in Fyers after stopping.
 app.post("/api/engine/stop", async (_req, res) => {
   try {
-    await sendTelegramAlert("🔴 <b>Traffic Light Engine STOPPED</b>\nKill switch triggered from dashboard.\n⚠️ Check Fyers positions manually.");
-    res.json({ success: true, message: "Engine stopping..." });
+    // Reply immediately so dashboard gets response before process dies
+    res.json({ success: true, message: "Exiting position then stopping engine..." });
+
+    // Exit open trade first
+    try {
+      if (tradeState.tradeActive) {
+        const { exitTrade } = await import("./Engines/traficLightEngine.js");
+        await exitTrade(lastTLLTP || 0, "MANUAL_STOP");
+        console.log("✅ Trade exited before engine stop");
+      } else {
+        console.log("ℹ️ No active trade — stopping engine directly");
+      }
+    } catch (e) {
+      console.error("❌ Exit trade failed on stop:", e.message);
+      await sendTelegramAlert(`⚠️ <b>Exit before stop FAILED</b>\n${e.message}\n⚠️ Check Fyers positions manually`);
+    }
+
+    await sendTelegramAlert("🔴 <b>Traffic Light Engine STOPPED</b>\nKill switch triggered from dashboard. Position exited.");
+
     setTimeout(() => {
       exec("pm2 stop trafic-light", (err) => {
         if (err) console.error("❌ pm2 stop failed:", err.message);
       });
-    }, 500);
+    }, 1000);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
