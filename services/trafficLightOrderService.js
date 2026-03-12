@@ -6,8 +6,9 @@ export const placeOrder = async ({ symbol, qty, side }) => {
   const isLive = process.env.LIVE_TRADING === "true";
 
   if (!isLive) {
-    console.log(`\n📝 [PAPER] ${sideLabel} ${qty} ${symbol}`);
-    return { s: "ok", id: null };
+    const paperId = `PAPER-${Date.now()}-${Math.random().toString(36).slice(2,6)}`;
+    console.log(`📝 [PAPER] ${sideLabel} ${qty} ${symbol} → id=${paperId}`);
+    return { s: "ok", id: paperId };
   }
 
   try {
@@ -73,11 +74,16 @@ export const placeOrder = async ({ symbol, qty, side }) => {
 // filled=true only when Fyers confirms status=2 (fully filled)
 // avgPrice = actual tradedPrice from Fyers — used to save real entry/exit price to DB
 // If rejected, cancelled, or timeout — throws so caller stops immediately
-export const waitForOrderFill = async (orderId, maxWaitMs = 10000, intervalMs = 500) => {
-  if (!orderId) return { filled: false, avgPrice: 0 }; // Paper mode
-
+export const waitForOrderFill = async (orderId, maxWaitMs = 10000, intervalMs = 500, paperPrice = 0) => {
   const isLive = process.env.LIVE_TRADING === "true";
-  if (!isLive) return { filled: false, avgPrice: 0 };
+
+  // Paper mode — simulate fill with the price passed in (spot or option LTP)
+  if (!isLive || !orderId || orderId.startsWith("PAPER-")) {
+    // Simulate Fyers confirm latency
+    await new Promise(r => setTimeout(r, 200));
+    console.log(`📝 [PAPER] Order ${orderId} simulated fill @ ${paperPrice ?? 0}`);
+    return { filled: true, avgPrice: paperPrice ?? 0 };
+  }
 
   const deadline = Date.now() + maxWaitMs;
 

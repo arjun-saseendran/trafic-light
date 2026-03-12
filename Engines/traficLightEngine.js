@@ -188,7 +188,7 @@ async function enterTrade(direction, spotPrice) {
 
     // Wait for Fyers to confirm FILLED — returns actual avgPrice
     // throws if rejected, cancelled, or timeout
-    const { filled, avgPrice } = await waitForOrderFill(orderRes?.id);
+    const { filled, avgPrice } = await waitForOrderFill(orderRes?.id, 10000, 500, spotPrice);
 
     // Save actual filled price from Fyers — not spotPrice
     const actualEntryPrice = (filled && avgPrice) ? avgPrice : spotPrice;
@@ -254,7 +254,7 @@ export async function exitTrade(exitSpotPrice, reason = "Manual Exit") {
   let exitAvgPrice = 0;
   try {
     const exitOrder = await placeOrder({ symbol: tradeState.optionSymbol, qty: LOT_SIZE, side: -1 });
-    const { filled, avgPrice } = await waitForOrderFill(exitOrder?.id);
+    const { filled, avgPrice } = await waitForOrderFill(exitOrder?.id, 10000, 500, exitSpotPrice);
     exitAvgPrice = avgPrice || 0;
     emitLog(`✅ Exit confirmed by Fyers | avgPrice=${exitAvgPrice}`, "success");
   } catch (exitErr) {
