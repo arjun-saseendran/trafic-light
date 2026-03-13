@@ -68,37 +68,34 @@ export const placeOrder = async ({ symbol, qty, side }) => {
   }
 };
 
-/**
- * Polls Fyers order status until the order is fully filled (or times out).
- * Returns { filled, avgPrice } when Fyers confirms status=2 (fully filled).
- *
- * ✅ FIX: Transient API errors (network hiccup, rate limit, bad response) now
- * log a warning and continue polling — they do NOT abort the loop.
- * Only a confirmed broker rejection (status 5 or 1) throws immediately.
- * This prevents a single bad poll from falsely declaring an already-filled
- * order as failed (root cause of the 2026-03-13 trade loss).
- *
- * @param {string} orderId   - Fyers order ID returned by placeOrder
- * @param {number} maxWaitMs - Max time to wait in ms (default: 10 seconds)
- * @param {number} intervalMs - Poll interval in ms (default: 500ms)
- */
 // Polls Fyers until order is FILLED or REJECTED — returns { filled, avgPrice }
 // filled=true only when Fyers confirms status=2 (fully filled)
 // avgPrice = actual tradedPrice from Fyers — used to save real entry/exit price to DB
-// If rejected/cancelled by broker → throws immediately (hard stop, no retry)
-// If transient API error → logs warning, continues polling until deadline
-// If timeout → throws so caller stops for the day
+//
+// Phase 1 — fast poll: every 500ms for up to maxWaitMs (default 10s)
+//   Covers normal fills. Transient errors warn and retry — never abort.
+//   Only a confirmed broker rejection (status 5 or 1) throws immediately.
+//
+// Phase 2 — background retry: every 2s indefinitely
+//   Order was placed on Fyers but fill not confirmed in time (slow API / volatile open).
+//   We MUST keep polling — throwing would abandon a potentially filled order.
+//   Caller is blocked on this promise — no second order can fire.
+//   Telegram alert fires once on entry to Phase 2.
+//
+// @param {string} orderId    - Fyers order ID returned by placeOrder
+// @param {number} maxWaitMs  - Phase 1 window in ms (default: 10 seconds)
+// @param {number} intervalMs - Phase 1 poll interval in ms (default: 500ms)
 export const waitForOrderFill = async (orderId, maxWaitMs = 10000, intervalMs = 500, paperPrice = 0) => {
   const isLive = process.env.LIVE_TRADING === "true";
 
   // Paper mode — simulate fill with the price passed in (spot or option LTP)
   if (!isLive || !orderId || orderId.startsWith("PAPER-")) {
-    // Simulate Fyers confirm latency
     await new Promise(r => setTimeout(r, 200));
     console.log(`📝 [PAPER] Order ${orderId} simulated fill @ ${paperPrice ?? 0}`);
     return { filled: true, avgPrice: paperPrice ?? 0 };
   }
 
+  // ── Phase 1: Fast polling ─────────────────────────────────────────────────
   const deadline = Date.now() + maxWaitMs;
 
   while (Date.now() < deadline) {
@@ -116,29 +113,75 @@ export const waitForOrderFill = async (orderId, maxWaitMs = 10000, intervalMs = 
         }
 
         if (status === 5 || status === 1) {
-          // ✅ Confirmed broker rejection — hard stop, no point retrying
+          // Confirmed broker rejection — hard stop, no retry
           throw new Error(`Order ${orderId} rejected/cancelled by broker (status=${status})`);
         }
 
         // Any other status (open, pending, transit) — keep polling
         console.log(`⏳ Order ${orderId} status=${status} — polling...`);
       } else {
-        // ✅ Non-ok response or empty orderBook — transient API issue, keep polling
+        // Non-ok response or empty orderBook — transient API issue, keep polling
         console.warn(`⚠️ Order ${orderId} poll got unexpected response (s=${response?.s}) — retrying...`);
       }
 
     } catch (err) {
-      // ✅ FIX: Only re-throw confirmed broker rejections (our own throw above).
+      // Only re-throw confirmed broker rejections (our own throw above).
       // All other errors (network timeout, rate limit, SDK exception) are transient —
-      // log and keep polling. A single bad API call must NOT abort confirmation.
+      // log and keep polling.
       if (err.message.includes("rejected/cancelled by broker")) throw err;
       console.warn(`⚠️ Order ${orderId} poll error — retrying: ${err.message}`);
     }
 
-    await new Promise((res) => setTimeout(res, intervalMs));
+    await new Promise(r => setTimeout(r, intervalMs));
   }
 
-  throw new Error(`Order ${orderId} did not fill within ${maxWaitMs / 1000}s — timeout`);
+  // ── Phase 2: Background retry — indefinite ───────────────────────────────
+  // Order was placed on Fyers but fill not confirmed in Phase 1 window.
+  // Keep polling every 2s until Fyers gives a definitive answer.
+  console.warn(`⚠️ Fyers: ${orderId} not confirmed in ${maxWaitMs / 1000}s — entering background retry every 2s`);
+  await sendTrafficAlert(
+    `⚠️ <b>Order confirm slow</b>\n` +
+    `Order ID: ${orderId}\n` +
+    `Not confirmed in ${maxWaitMs / 1000}s — polling Fyers every 2s until definitive answer`
+  );
+
+  let attempt = 0;
+  while (true) {
+    attempt++;
+    await new Promise(r => setTimeout(r, 2000));
+    try {
+      const response = await fyers.get_order_history({ id: orderId });
+
+      if (response.s === "ok" && response.orderBook?.length) {
+        const order  = response.orderBook[0];
+        const status = order.status;
+
+        if (status === 2) {
+          const avgPrice = order.tradedPrice || 0;
+          console.log(`✅ BG retry ${attempt}: Order ${orderId} FILLED | avgPrice=${avgPrice}`);
+          await sendTrafficAlert(
+            `✅ <b>Order confirmed (background)</b>\n` +
+            `Order ID: ${orderId}\n` +
+            `Avg Price: ${avgPrice}\n` +
+            `Confirmed after ${attempt} background attempt(s)`
+          );
+          return { filled: true, avgPrice };
+        }
+
+        if (status === 5 || status === 1) {
+          throw new Error(`Order ${orderId} rejected/cancelled by broker (status=${status})`);
+        }
+
+        console.warn(`⚠️ BG retry ${attempt}: Order ${orderId} status=${status} — still waiting...`);
+      } else {
+        console.warn(`⚠️ BG retry ${attempt}: unexpected response (s=${response?.s}) — retrying...`);
+      }
+
+    } catch (err) {
+      if (err.message.includes("rejected/cancelled by broker")) throw err;
+      console.warn(`⚠️ BG retry ${attempt}: poll error — retrying: ${err.message}`);
+    }
+  }
 };
 
 /**

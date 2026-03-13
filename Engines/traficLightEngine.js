@@ -258,18 +258,20 @@ export async function exitTrade(exitSpotPrice, reason = "Manual Exit") {
     exitAvgPrice = avgPrice || 0;
     emitLog(`✅ Exit confirmed by Fyers | avgPrice=${exitAvgPrice}`, "success");
   } catch (exitErr) {
-    emitLog(`❌ Exit order FAILED: ${exitErr.message} — stopping, manual intervention required`, "error");
+    // waitForOrderFill never times out — only throws on confirmed broker rejection.
+    // Rejection means the order was NOT filled — position is still open on Fyers.
+    // Restore tradeActive=true and release exitInFlight so the next tick
+    // can re-trigger exitTrade and attempt the exit again.
+    emitLog(`❌ Exit order REJECTED by broker: ${exitErr.message} — will retry on next tick`, "error");
     await sendTrafficAlert(
-      `🚨 <b>EXIT ORDER FAILED</b>
-` +
-      `Symbol: ${tradeState.optionSymbol}
-` +
-      `Error: ${exitErr.message}
-` +
-      `⚠️ Check Fyers positions manually`
+      `🚨 <b>EXIT ORDER REJECTED</b>\n` +
+      `Symbol: ${tradeState.optionSymbol}\n` +
+      `Error: ${exitErr.message}\n` +
+      `⚠️ Position is still open on Fyers — retrying exit on next tick`
     );
-    tradeState.exitInFlight = false;
-    return; // stop — do not save DB, do not reset state
+    tradeState.tradeActive   = true;  // Position still open — allow next tick to re-trigger exit
+    tradeState.exitInFlight  = false; // Release lock so next tick can enter exitTrade
+    return; // do not write DB, do not reset state
   }
 
   // ── Fetch actual PnL from Fyers position data ─────────────────────────────
