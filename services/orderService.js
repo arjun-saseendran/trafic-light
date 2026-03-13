@@ -47,7 +47,13 @@ export const placeOrder = async ({ symbol, qty, side }) => {
       throw new Error(response.message);
     }
 
-    return response; // response.id is the Fyers order ID
+    // ✅ FIX: Normalize response.id to string.
+    // Fyers API returns id as a JSON number (e.g. 26031300100896).
+    // waitForOrderFill calls orderId.startsWith("PAPER-") which crashes
+    // with TypeError if orderId is a number. String() is safe regardless
+    // of whether Fyers already sends a string or a number.
+    response.id = String(response.id);
+    return response; // response.id is now always a string
 
   } catch (err) {
     console.error("❌ Execution API Error:", err.message);
@@ -64,7 +70,13 @@ export const placeOrder = async ({ symbol, qty, side }) => {
 
 /**
  * Polls Fyers order status until the order is fully filled (or times out).
- * Returns true if filled, false if timed out or failed.
+ * Returns { filled, avgPrice } when Fyers confirms status=2 (fully filled).
+ *
+ * ✅ FIX: Transient API errors (network hiccup, rate limit, bad response) now
+ * log a warning and continue polling — they do NOT abort the loop.
+ * Only a confirmed broker rejection (status 5 or 1) throws immediately.
+ * This prevents a single bad poll from falsely declaring an already-filled
+ * order as failed (root cause of the 2026-03-13 trade loss).
  *
  * @param {string} orderId   - Fyers order ID returned by placeOrder
  * @param {number} maxWaitMs - Max time to wait in ms (default: 10 seconds)
@@ -73,7 +85,9 @@ export const placeOrder = async ({ symbol, qty, side }) => {
 // Polls Fyers until order is FILLED or REJECTED — returns { filled, avgPrice }
 // filled=true only when Fyers confirms status=2 (fully filled)
 // avgPrice = actual tradedPrice from Fyers — used to save real entry/exit price to DB
-// If rejected, cancelled, or timeout — throws so caller stops immediately
+// If rejected/cancelled by broker → throws immediately (hard stop, no retry)
+// If transient API error → logs warning, continues polling until deadline
+// If timeout → throws so caller stops for the day
 export const waitForOrderFill = async (orderId, maxWaitMs = 10000, intervalMs = 500, paperPrice = 0) => {
   const isLive = process.env.LIVE_TRADING === "true";
 
@@ -102,11 +116,23 @@ export const waitForOrderFill = async (orderId, maxWaitMs = 10000, intervalMs = 
         }
 
         if (status === 5 || status === 1) {
-          throw new Error(`Order ${orderId} rejected/cancelled (status=${status})`);
+          // ✅ Confirmed broker rejection — hard stop, no point retrying
+          throw new Error(`Order ${orderId} rejected/cancelled by broker (status=${status})`);
         }
+
+        // Any other status (open, pending, transit) — keep polling
+        console.log(`⏳ Order ${orderId} status=${status} — polling...`);
+      } else {
+        // ✅ Non-ok response or empty orderBook — transient API issue, keep polling
+        console.warn(`⚠️ Order ${orderId} poll got unexpected response (s=${response?.s}) — retrying...`);
       }
+
     } catch (err) {
-      throw new Error(`Order confirm failed: ${err.message}`);
+      // ✅ FIX: Only re-throw confirmed broker rejections (our own throw above).
+      // All other errors (network timeout, rate limit, SDK exception) are transient —
+      // log and keep polling. A single bad API call must NOT abort confirmation.
+      if (err.message.includes("rejected/cancelled by broker")) throw err;
+      console.warn(`⚠️ Order ${orderId} poll error — retrying: ${err.message}`);
     }
 
     await new Promise((res) => setTimeout(res, intervalMs));
