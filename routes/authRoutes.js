@@ -3,7 +3,7 @@ import { login, callback } from "../controllers/authControllers.js";
 
 const router = express.Router();
 
-router.get("/trafic-light/login", login);
-router.get("/trafic-light/callback", callback);
+router.get("/fyers/login", login);
+router.get("/fyers/callback", callback);
 
 export default router;

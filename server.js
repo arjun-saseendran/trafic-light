@@ -76,7 +76,7 @@ io.on("connection", (socket) => {
 });
 
 // Routes
-app.use("/tl/api/auth", authRoutes);
+app.use("/api/auth", authRoutes);
 
 // ── Traffic Light Status ───────────────────────────────────────────────────────
 app.get("/api/traffic/status", (req, res) => {
@@ -188,7 +188,7 @@ process.on("uncaughtException", async (err) => {
     await sendTelegramAlert(
       `💥 <b>Traffic Light Server Crash</b>\n<code>${err.message}</code>`,
     );
-  } catch (_) {}
+  } catch (_) { }
   process.exit(1);
 });
 
@@ -199,7 +199,7 @@ process.on("unhandledRejection", async (reason) => {
     await sendTelegramAlert(
       `⚠️ <b>Unhandled Rejection</b>\n<code>${msg}</code>`,
     );
-  } catch (_) {}
+  } catch (_) { }
 });
 
 // ─── STARTUP ──────────────────────────────────────────────────────────────────
