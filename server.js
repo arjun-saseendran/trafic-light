@@ -9,6 +9,9 @@ import { exec } from "child_process";
 // ─── Config & Routes ──────────────────────────────────────────────────────────
 import { connectDatabases } from "./config/db.js";
 
+// Auth
+import authRoutes from "./routes/authRoutes.js";
+
 // ─── Models ───────────────────────────────────────────────────────────────────
 import TradePerformance from "./models/tradePerformanceModel.js";
 import { DailyStatus } from "./models/dailyStatusModel.js";
@@ -64,12 +67,16 @@ const io = new Server(server, {
 
 setSocketIO(io);
 setTrafficIO(io);
+app.set("io", io);
 
 io.on("connection", (socket) => {
   socket.on("market_tick", (data) => {
     if (data?.price) lastTLLTP = data.price;
   });
 });
+
+// Routes
+app.use("/tl/api/auth", authRoutes);
 
 // ── Traffic Light Status ───────────────────────────────────────────────────────
 app.get("/api/traffic/status", (req, res) => {
@@ -139,7 +146,10 @@ app.get("/status", (req, res) =>
 app.post("/api/engine/stop", async (_req, res) => {
   try {
     // Reply immediately so dashboard gets response before process dies
-    res.json({ success: true, message: "Exiting position then stopping engine..." });
+    res.json({
+      success: true,
+      message: "Exiting position then stopping engine...",
+    });
 
     // Exit open trade first
     try {
@@ -152,10 +162,14 @@ app.post("/api/engine/stop", async (_req, res) => {
       }
     } catch (e) {
       console.error("❌ Exit trade failed on stop:", e.message);
-      await sendTelegramAlert(`⚠️ <b>Exit before stop FAILED</b>\n${e.message}\n⚠️ Check Fyers positions manually`);
+      await sendTelegramAlert(
+        `⚠️ <b>Exit before stop FAILED</b>\n${e.message}\n⚠️ Check Fyers positions manually`,
+      );
     }
 
-    await sendTelegramAlert("🔴 <b>Traffic Light Engine STOPPED</b>\nKill switch triggered from dashboard. Position exited.");
+    await sendTelegramAlert(
+      "🔴 <b>Traffic Light Engine STOPPED</b>\nKill switch triggered from dashboard. Position exited.",
+    );
 
     setTimeout(() => {
       exec("pm2 stop trafic-light", (err) => {
