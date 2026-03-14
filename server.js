@@ -15,6 +15,7 @@ import authRoutes from "./routes/authRoutes.js";
 // ─── Models ───────────────────────────────────────────────────────────────────
 import TradePerformance from "./models/tradePerformanceModel.js";
 import { DailyStatus } from "./models/dailyStatusModel.js";
+import { Token } from "./models/tokenModel.js";
 
 // ─── Services & Strategy ──────────────────────────────────────────────────────
 import { resetDailyState, tradeState } from "./state/tradeState.js";
@@ -23,6 +24,7 @@ import { sendTelegramAlert } from "./services/telegramService.js";
 
 // ─── Live Data ────────────────────────────────────────────────────────────────
 import { initFyersLiveData } from "./services/fyersLiveData.js";
+import { setFyersAccessToken } from "./config/fyersConfig.js";
 
 // ─── Socket shared module ─────────────────────────────────────────────────────
 import { setIO as setSocketIO } from "./config/socket.js";
@@ -188,7 +190,7 @@ process.on("uncaughtException", async (err) => {
     await sendTelegramAlert(
       `💥 <b>Traffic Light Server Crash</b>\n<code>${err.message}</code>`,
     );
-  } catch (_) { }
+  } catch (_) {}
   process.exit(1);
 });
 
@@ -199,7 +201,7 @@ process.on("unhandledRejection", async (reason) => {
     await sendTelegramAlert(
       `⚠️ <b>Unhandled Rejection</b>\n<code>${msg}</code>`,
     );
-  } catch (_) { }
+  } catch (_) {}
 });
 
 // ─── STARTUP ──────────────────────────────────────────────────────────────────
@@ -222,12 +224,18 @@ const start = async () => {
       console.log(`🚀 Traffic Light Server Online · port ${PORT}`);
       await sendTelegramAlert("🚦 <b>Traffic Light Server Online! ✅</b>");
 
-      if (process.env.FYERS_ACCESS_TOKEN) {
-        await initFyersLiveData();
-        console.log("✅ Fyers live data started (Traffic Light)");
+      // ─── Load Fyers token from DB ──────────────────────────────────────────
+      const savedToken = await Token.findOne({});
+      if (savedToken?.accessToken) {
+        setFyersAccessToken(savedToken.accessToken);
+        await initFyersLiveData(io);
+        console.log("✅ Fyers live data started from saved token");
       } else {
         console.warn(
-          "⚠️ FYERS_ACCESS_TOKEN missing — Traffic Light will not receive live data",
+          "⚠️ No token in DB — visit /api/auth/fyers/login to authenticate",
+        );
+        await sendTelegramAlert(
+          "⚠️ <b>Fyers token missing</b>\nVisit /api/auth/fyers/login to authenticate",
         );
       }
     });
