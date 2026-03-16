@@ -188,7 +188,7 @@ async function enterTrade(direction, spotPrice) {
 
     // Wait for Fyers to confirm FILLED — returns actual avgPrice
     // throws if rejected, cancelled, or timeout
-    const { filled, avgPrice } = await waitForOrderFill(orderRes?.id, 10000, 500, spotPrice);
+    const { filled, avgPrice } = await waitForOrderFill(orderRes?.id, spotPrice);
 
     // Save actual filled price from Fyers — not spotPrice
     const actualEntryPrice = (filled && avgPrice) ? avgPrice : spotPrice;
@@ -250,27 +250,70 @@ export async function exitTrade(exitSpotPrice, reason = "Manual Exit") {
   tradeState.tradeTakenToday = true;  // ✅ FIX: prevent second entry after exit — one trade per day
   tradeState.exitReason      = reason;
 
-  // Place exit order → wait Fyers COMPLETE → throw on failure, stop and alert
+  // Place exit order → wait for Fyers confirmation
+  // Two failure cases handled separately:
+  //   REJECTION  — Fyers says order rejected/cancelled → retry on next tick
+  //   DELAY      — Fyers not responding (socket/REST timeout) → keep retrying every 2s here
   let exitAvgPrice = 0;
   try {
     const exitOrder = await placeOrder({ symbol: tradeState.optionSymbol, qty: LOT_SIZE, side: -1 });
-    const { filled, avgPrice } = await waitForOrderFill(exitOrder?.id, 10000, 500, exitSpotPrice);
-    exitAvgPrice = avgPrice || 0;
-    emitLog(`✅ Exit confirmed by Fyers | avgPrice=${exitAvgPrice}`, "success");
+
+    // ── DELAY RETRY LOOP ────────────────────────────────────────────────────
+    // If Fyers order data is delayed (socket timeout → REST timeout), keep
+    // retrying waitForOrderFill every 2s until we get a definitive answer.
+    // Telegram alert fires once on first delay, then silent retries.
+    let delayAlertSent = false;
+    while (true) {
+      try {
+        const { filled, avgPrice } = await waitForOrderFill(exitOrder?.id, exitSpotPrice);
+        exitAvgPrice = avgPrice || 0;
+        emitLog(`✅ Exit confirmed by Fyers | avgPrice=${exitAvgPrice}`, "success");
+        break; // confirmed — exit the retry loop
+
+      } catch (fillErr) {
+        const isDelay = fillErr.message.includes("Unconfirmed") || fillErr.message.includes("socket timeout") || fillErr.message.includes("No confirmation");
+        const isRejection = fillErr.message.includes("rejected/cancelled by broker");
+
+        if (isRejection) {
+          // Fyers explicitly rejected this exit order — bubble up to outer catch
+          throw fillErr;
+        }
+
+        if (isDelay) {
+          // Fyers order data delayed — alert once, then keep retrying
+          if (!delayAlertSent) {
+            delayAlertSent = true;
+            emitLog(`⚠️ Exit order data delayed — retrying every 2s until Fyers confirms`, "warn");
+            await sendTrafficAlert(
+              `⚠️ <b>Exit Order Data Delayed</b>\n` +
+              `Symbol: ${tradeState.optionSymbol}\n` +
+              `Order ID: ${exitOrder?.id}\n` +
+              `Fyers not responding — retrying every 2s\n` +
+              `⏳ Bot is waiting for confirmation, position still being managed`
+            );
+          }
+          await new Promise(r => setTimeout(r, 2000));
+          continue; // retry waitForOrderFill
+        }
+
+        // Unknown error — treat as delay and retry
+        emitLog(`⚠️ Exit fill check error: ${fillErr.message} — retrying`, "warn");
+        await new Promise(r => setTimeout(r, 2000));
+      }
+    }
+
   } catch (exitErr) {
-    // waitForOrderFill never times out — only throws on confirmed broker rejection.
-    // Rejection means the order was NOT filled — position is still open on Fyers.
-    // Restore tradeActive=true and release exitInFlight so the next tick
-    // can re-trigger exitTrade and attempt the exit again.
+    // Only reaches here on confirmed broker REJECTION (not delay)
+    // Position is still open on Fyers — restore state and retry on next tick
     emitLog(`❌ Exit order REJECTED by broker: ${exitErr.message} — will retry on next tick`, "error");
     await sendTrafficAlert(
-      `🚨 <b>EXIT ORDER REJECTED</b>\n` +
+      `🚨 <b>Exit Order REJECTED</b>\n` +
       `Symbol: ${tradeState.optionSymbol}\n` +
       `Error: ${exitErr.message}\n` +
-      `⚠️ Position is still open on Fyers — retrying exit on next tick`
+      `⚠️ Position still open on Fyers — retrying exit on next tick`
     );
-    tradeState.tradeActive   = true;  // Position still open — allow next tick to re-trigger exit
-    tradeState.exitInFlight  = false; // Release lock so next tick can enter exitTrade
+    tradeState.tradeActive  = true;  // position still open — allow next tick to retry exit
+    tradeState.exitInFlight = false; // release lock
     return; // do not write DB, do not reset state
   }
 

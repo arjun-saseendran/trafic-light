@@ -1,31 +1,78 @@
 /**
  * fyersLiveData.js
  *
- * Fyers WebSocket — used ONLY for Traffic Light strategy (NIFTY spot ticks + candle building).
+ * Two Fyers sockets initialized together:
  *
- * ✅ FIX: Iron Condor price feeding REMOVED from this file.
- *    Iron Condor uses upstoxLiveData.js exclusively.
- *    Reason: ironCondorEngine.condorPrices is keyed by Upstox instrument keys
- *    (e.g. "NSE_FO|NIFTY10MAR202522500CE"). Fyers uses a different key format
- *    ("NSE:NIFTY25310CE"). Feeding Fyers keys into condorPrices caused all
- *    condorPrices lookups in monitorCondorLevels to return 0 — SL never fired.
+ *  1. fyersDataSocket  — NIFTY spot price ticks → Traffic Light engine (unchanged)
+ *  2. fyersOrderSocket — Order/trade push updates → resolves waitForOrderFill() instantly
  *
- * Architecture:
- *   fyersLiveData.js  → NIFTY spot tick → Traffic Light engine only
- *   upstoxLiveData.js → NIFTY/SENSEX spot + IC option legs → Iron Condor engine
+ * WHY TWO SOCKETS:
+ *   Fyers fyersDataSocket (market data) and fyersOrderSocket (order updates) are
+ *   separate WebSocket connections by design — they cannot be merged into one.
+ *   But we initialize both here so the whole Fyers connection lifecycle lives
+ *   in one place, and orderService.js never needs to know about sockets at all.
  */
 
-import { fyersDataSocket } from "fyers-api-v3";
+import { fyersDataSocket, fyersOrderSocket } from "fyers-api-v3";
 import { getIO } from "../config/socket.js";
 import { CandleBuilder } from "../services/candleBuilderTraficLight.js";
 import { handleNewCandle, handleTick } from "../Engines/traficLightEngine.js";
 import { sendTelegramAlert as sendTrafficAlert } from "../services/telegramService.js";
 
-// Iron Condor imports REMOVED — Upstox handles those now
-
-const NIFTY_SPOT        = "NSE:NIFTY50-INDEX";
+const NIFTY_SPOT         = "NSE:NIFTY50-INDEX";
 const niftyCandleBuilder = new CandleBuilder(3);
 
+// Pending order confirmations: Map of orderId → { resolve, reject, timer }
+const _pendingOrders = new Map();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PUBLIC: called by orderService.js — waits for Fyers to push a fill/rejection
+// ─────────────────────────────────────────────────────────────────────────────
+export const waitForOrderConfirmation = (orderId, timeoutMs = 30000) => {
+  return new Promise((resolve, reject) => {
+    const id = String(orderId);
+
+    const timer = setTimeout(() => {
+      _pendingOrders.delete(id);
+      reject(new Error(`Order ${id}: No confirmation from Fyers order socket in ${timeoutMs / 1000}s`));
+    }, timeoutMs);
+
+    _pendingOrders.set(id, { resolve, reject, timer });
+  });
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INTERNAL: called when Fyers pushes an order update on the socket
+// ─────────────────────────────────────────────────────────────────────────────
+function handleOrderUpdate(msg) {
+  // Fyers sends either a single object or an array
+  const orders = Array.isArray(msg) ? msg : [msg];
+
+  for (const order of orders) {
+    const id     = String(order?.id ?? order?.orderId ?? "");
+    const status = order?.status; // 2=Filled, 5=Rejected, 1=Cancelled
+
+    if (!id || !_pendingOrders.has(id)) continue;
+
+    const { resolve, reject, timer } = _pendingOrders.get(id);
+    clearTimeout(timer);
+    _pendingOrders.delete(id);
+
+    if (status === 2) {
+      const avgPrice = order?.tradedPrice ?? order?.avgPrice ?? 0;
+      console.log(`✅ [OrderSocket] Order ${id} FILLED | avgPrice=${avgPrice}`);
+      resolve({ filled: true, avgPrice });
+    } else if (status === 5 || status === 1) {
+      console.error(`❌ [OrderSocket] Order ${id} REJECTED/CANCELLED (status=${status})`);
+      reject(new Error(`Order ${id} rejected/cancelled by broker (status=${status})`));
+    }
+    // Other statuses (open/pending) — Fyers will push again when final. Do nothing.
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INIT — called once from server.js after token is loaded
+// ─────────────────────────────────────────────────────────────────────────────
 export const initFyersLiveData = async () => {
   const io          = getIO();
   const accessToken = process.env.FYERS_ACCESS_TOKEN;
@@ -41,12 +88,13 @@ export const initFyersLiveData = async () => {
     ? accessToken
     : `${wsAppId}:${accessToken}`;
 
-  console.log("🔌 Connecting to Fyers Live Data Socket (Traffic Light only)...");
+  // ── 1. Market Data Socket (price ticks) ────────────────────────────────────
+  console.log("🔌 Connecting Fyers market data socket...");
   const fyersData = fyersDataSocket.getInstance(wsToken, "./logs");
   fyersData.autoreconnect();
 
   fyersData.on("connect", () => {
-    console.log("✅ Fyers Live Data Connected! Subscribing NIFTY spot for Traffic Light.");
+    console.log("✅ Fyers Market Data Connected — subscribing NIFTY spot");
     fyersData.subscribe([NIFTY_SPOT], false);
     sendTrafficAlert(`✅ <b>Fyers Feed Connected</b>\nNIFTY spot subscribed — Traffic Light live`);
   });
@@ -54,36 +102,61 @@ export const initFyersLiveData = async () => {
   fyersData.on("message", async (msg) => {
     const symbol = msg.symbol || msg.n;
     const price  = msg.ltp    || msg.v?.lp;
-
     if (!symbol || !price) return;
 
-    // 🚦 Traffic Light — NIFTY spot only
     if (symbol === NIFTY_SPOT) {
       await handleTick(price);
-
       if (io) io.emit("market_tick", { price, timestamp: Date.now() });
 
       const finishedCandle = niftyCandleBuilder.build(price, Date.now());
       if (finishedCandle) {
-        console.log(
-          `\n📦 New 3-Min Candle: ${finishedCandle.color.toUpperCase()} | Range: ${finishedCandle.range.toFixed(2)}`
-        );
+        console.log(`\n📦 New 3-Min Candle: ${finishedCandle.color.toUpperCase()} | Range: ${finishedCandle.range.toFixed(2)}`);
         handleNewCandle(finishedCandle);
       }
     }
-    // All other symbols ignored — Iron Condor handled by upstoxLiveData.js
   });
 
   fyersData.on("error", (err) => {
     const msg = err?.message || String(err);
-    console.error("❌ Fyers Live Data Error:", msg);
+    console.error("❌ Fyers Market Data Error:", msg);
     sendTrafficAlert(`❌ <b>Fyers Feed Error</b>\n<code>${msg}</code>\n⚠️ Auto-reconnecting...`);
   });
 
   fyersData.on("close", () => {
-    console.log("⚠️ Fyers Live Data Closed. Auto-reconnecting...");
+    console.log("⚠️ Fyers Market Data Closed — auto-reconnecting...");
     sendTrafficAlert(`⚠️ <b>Fyers Feed Disconnected</b>\nAuto-reconnecting...`);
   });
 
   fyersData.connect();
+
+  // ── 2. Order Socket (order fill confirmations) ─────────────────────────────
+  console.log("🔌 Connecting Fyers order socket...");
+  const orderSkt = new fyersOrderSocket(wsToken, "./logs", false);
+
+  orderSkt.on("connect", () => {
+    console.log("✅ Fyers Order Socket Connected — subscribing order + trade updates");
+    orderSkt.subscribe([orderSkt.orderUpdates, orderSkt.tradeUpdates]);
+  });
+
+  orderSkt.on("orders", (msg) => {
+    console.log("📬 Fyers order update:", JSON.stringify(msg));
+    handleOrderUpdate(msg);
+  });
+
+  orderSkt.on("trades", (msg) => {
+    // Trades also carry fill info — handle as a backup
+    console.log("📬 Fyers trade update:", JSON.stringify(msg));
+    handleOrderUpdate(msg);
+  });
+
+  orderSkt.on("error", (err) => {
+    console.error("❌ Fyers Order Socket Error:", err?.message ?? err);
+  });
+
+  orderSkt.on("close", () => {
+    console.warn("⚠️ Fyers Order Socket Closed — auto-reconnecting...");
+  });
+
+  orderSkt.autoreconnect();
+  orderSkt.connect();
 };
