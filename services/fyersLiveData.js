@@ -22,51 +22,81 @@ import { sendTelegramAlert as sendTrafficAlert } from "../services/telegramServi
 const NIFTY_SPOT         = "NSE:NIFTY50-INDEX";
 const niftyCandleBuilder = new CandleBuilder(3);
 
+// ─── Order confirmation ───────────────────────────────────────────────────────
+// TWO sources can resolve a pending order — whichever arrives first wins:
+//   1. Fyers Postback (HTTP POST to /api/orders/postback-traffic) — most reliable
+//   2. Fyers Order Socket (WebSocket push) — backup
+//
+// Both call _resolveOrder() internally.
+// Hard timeout 60s → falls back to REST poll in orderService.js
+// ─────────────────────────────────────────────────────────────────────────────
+
 // Pending order confirmations: Map of orderId → { resolve, reject, timer }
 const _pendingOrders = new Map();
 
-// ─────────────────────────────────────────────────────────────────────────────
-// PUBLIC: called by orderService.js — waits for Fyers to push a fill/rejection
-// ─────────────────────────────────────────────────────────────────────────────
-export const waitForOrderConfirmation = (orderId, timeoutMs = 30000) => {
+// ─── Internal: resolve or reject a pending order ─────────────────────────────
+function _resolveOrder(order, source) {
+  // Fyers uses numeric status: 2=Filled, 5=Rejected, 1=Cancelled
+  // Fyers postback may send string status too
+  const id     = String(order?.id ?? order?.orderId ?? order?.order_id ?? "");
+  const status = order?.status;
+
+  if (!id || !_pendingOrders.has(id)) return;
+
+  const isFilled   = status === 2 || status === "2";
+  const isRejected = status === 5 || status === 1 || status === "5" || status === "1";
+
+  if (isFilled) {
+    const { resolve, timer } = _pendingOrders.get(id);
+    clearTimeout(timer);
+    _pendingOrders.delete(id);
+    const avgPrice = order?.tradedPrice ?? order?.avgPrice ?? order?.traded_price ?? 0;
+    console.log(`✅ [${source}] Order ${id} FILLED | avgPrice=${avgPrice}`);
+    resolve({ filled: true, avgPrice });
+
+  } else if (isRejected) {
+    const { reject, timer } = _pendingOrders.get(id);
+    clearTimeout(timer);
+    _pendingOrders.delete(id);
+    console.error(`❌ [${source}] Order ${id} REJECTED/CANCELLED (status=${status})`);
+    reject(new Error(`Order ${id} rejected/cancelled by broker (status=${status})`));
+  }
+  // Other statuses (open/pending) → Fyers will push again when final
+}
+
+// ─── PUBLIC: called by trafic-light server.js postback route ─────────────────
+// Fyers POSTs order updates to /api/orders/postback-traffic when orders fill.
+// This is the PRIMARY confirmation method — independent of WebSocket.
+export const resolveOrderFromPostback = (order) => {
+  const id     = String(order?.id ?? order?.order_id ?? "");
+  const status = order?.status;
+  console.log(`📬 [Postback] order_id=${id} status=${status} avgPrice=${order?.tradedPrice ?? 0}`);
+  _resolveOrder(order, "Postback");
+};
+
+// ─── PUBLIC: called by orderService.js ───────────────────────────────────────
+// Register BEFORE placing the order so postback/socket cannot be missed.
+// Hard timeout 60s → falls back to REST poll in orderService.js
+export const waitForOrderConfirmation = (orderId, timeoutMs = 60000) => {
   return new Promise((resolve, reject) => {
     const id = String(orderId);
 
     const timer = setTimeout(() => {
       _pendingOrders.delete(id);
-      reject(new Error(`Order ${id}: No confirmation from Fyers order socket in ${timeoutMs / 1000}s`));
+      reject(new Error(`Order ${id}: No confirmation from Fyers in ${timeoutMs / 1000}s (postback + socket both silent)`));
     }, timeoutMs);
 
     _pendingOrders.set(id, { resolve, reject, timer });
   });
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// INTERNAL: called when Fyers pushes an order update on the socket
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── INTERNAL: called when Fyers pushes an order update on the socket ─────────
+// BACKUP — fires if postback didn't arrive first.
+// Both can fire safely — _resolveOrder() ignores already-resolved orders.
 function handleOrderUpdate(msg) {
-  // Fyers sends either a single object or an array
   const orders = Array.isArray(msg) ? msg : [msg];
-
   for (const order of orders) {
-    const id     = String(order?.id ?? order?.orderId ?? "");
-    const status = order?.status; // 2=Filled, 5=Rejected, 1=Cancelled
-
-    if (!id || !_pendingOrders.has(id)) continue;
-
-    const { resolve, reject, timer } = _pendingOrders.get(id);
-    clearTimeout(timer);
-    _pendingOrders.delete(id);
-
-    if (status === 2) {
-      const avgPrice = order?.tradedPrice ?? order?.avgPrice ?? 0;
-      console.log(`✅ [OrderSocket] Order ${id} FILLED | avgPrice=${avgPrice}`);
-      resolve({ filled: true, avgPrice });
-    } else if (status === 5 || status === 1) {
-      console.error(`❌ [OrderSocket] Order ${id} REJECTED/CANCELLED (status=${status})`);
-      reject(new Error(`Order ${id} rejected/cancelled by broker (status=${status})`));
-    }
-    // Other statuses (open/pending) — Fyers will push again when final. Do nothing.
+    _resolveOrder(order, "OrderSocket");
   }
 }
 

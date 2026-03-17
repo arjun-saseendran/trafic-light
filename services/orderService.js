@@ -81,19 +81,20 @@ export const waitForOrderFill = async (orderId, paperPrice = 0) => {
   const orderIdStr = String(orderId);
 
   try {
-    // PRIMARY: wait for Fyers to push order update on the order socket
-    const result = await waitForOrderConfirmation(orderIdStr);
+    // PRIMARY: wait for Fyers postback or order socket — whichever arrives first
+    // 60s timeout → falls back to REST poll below
+    const result = await waitForOrderConfirmation(orderIdStr, 60000);
     return result;
 
-  } catch (socketErr) {
-    // Socket timed out (30s) — fall back to REST poll as safety net
-    console.warn(`⚠️ Order socket gave no answer for ${orderIdStr}: ${socketErr.message}`);
+  } catch (confirmErr) {
+    // Both postback and socket silent for 60s — fall back to REST poll
+    console.warn(`⚠️ No postback/socket confirmation for ${orderIdStr}: ${confirmErr.message}`);
     console.warn(`⚠️ Falling back to REST poll...`);
     await sendTrafficAlert(
-      `⚠️ <b>Order socket timeout</b>\nOrder ID: ${orderIdStr}\n${socketErr.message}\nFalling back to REST poll...`
+      `⚠️ <b>Order confirmation delayed</b>\nOrder ID: ${orderIdStr}\n${confirmErr.message}\nFalling back to REST poll...`
     );
 
-    return await restPoll(orderIdStr, intervalMs);
+    return await restPoll(orderIdStr, 2000);
   }
 };
 
