@@ -213,10 +213,33 @@ const start = async () => {
       timeZone: "Asia/Kolkata",
     }).format(new Date());
     const dailyRecord = await DailyStatus.findOne({ date: today });
+
+    // ─── Check if market is currently open ────────────────────────────────────
+    // Market hours: 9:15 AM – 3:30 PM IST weekdays
+    // If restarting outside market hours — clear breakout range and block entry.
+    // Without this, old breakout range from morning gets loaded and bot tries
+    // to enter a trade at 8 PM when Fyers rejects with "MIS disallowed".
+    const nowIST = new Intl.DateTimeFormat("en-US", {
+      timeZone: "Asia/Kolkata",
+      hour: "numeric", minute: "numeric", hour12: false,
+    }).format(new Date());
+    const [nowH, nowM] = nowIST.split(":").map(Number);
+    const nowMins = nowH * 60 + nowM;
+    const isMarketOpen = nowMins >= 555 && nowMins < 930; // 9:15 AM to 3:30 PM
+
     if (dailyRecord) {
       tradeState.tradeTakenToday = dailyRecord.tradeTakenToday || false;
-      tradeState.breakoutHigh = dailyRecord.breakoutHigh;
-      tradeState.breakoutLow = dailyRecord.breakoutLow;
+      if (isMarketOpen) {
+        // Market is open — safe to restore breakout range
+        tradeState.breakoutHigh = dailyRecord.breakoutHigh;
+        tradeState.breakoutLow  = dailyRecord.breakoutLow;
+      } else {
+        // Market closed — clear breakout range and block any entry attempt
+        tradeState.breakoutHigh    = null;
+        tradeState.breakoutLow     = null;
+        tradeState.tradeTakenToday = true; // block entry until next day reset
+        console.log("⏰ Market closed — breakout range cleared, entry blocked until 9:00 AM reset");
+      }
     }
 
     const PORT = process.env.PORT || 3001;
