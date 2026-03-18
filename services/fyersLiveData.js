@@ -166,7 +166,13 @@ export const initFyersLiveData = async () => {
       await handleTick(price);
       if (io) io.emit("market_tick", { price, timestamp: Date.now() });
 
-      const finishedCandle = niftyCandleBuilder.build(price, Date.now());
+      // ✅ FIX: Use Fyers exchange timestamp (msg.tt in seconds) for candle bucketing.
+      //         Previously used Date.now() (client clock) which caused wrong bucket
+      //         assignment due to network delay — resulting in incorrect candle high/low.
+      //         msg.tt is the exchange timestamp in seconds → convert to ms for CandleBuilder.
+      //         Fallback to Date.now() only if tt is missing.
+      const tickTs = msg.tt ? msg.tt * 1000 : Date.now();
+      const finishedCandle = niftyCandleBuilder.build(price, tickTs);
       if (finishedCandle) {
         console.log(`\n📦 New 3-Min Candle: ${finishedCandle.color.toUpperCase()} | Range: ${finishedCandle.range.toFixed(2)}`);
         handleNewCandle(finishedCandle);
