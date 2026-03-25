@@ -1,5 +1,5 @@
 export class CandleBuilder {
-  constructor(timeframeMinutes = 3) {
+  constructor(timeframeMinutes = 5) {
     this.currentCandle = null;
     this.timeframeMs = timeframeMinutes * 60 * 1000; 
   }

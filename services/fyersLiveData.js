@@ -20,7 +20,7 @@ import { handleNewCandle, handleTick } from "../Engines/traficLightEngine.js";
 import { sendTelegramAlert as sendTrafficAlert } from "../services/telegramService.js";
 
 const NIFTY_SPOT         = "NSE:NIFTY50-INDEX";
-const niftyCandleBuilder = new CandleBuilder(3);
+const niftyCandleBuilder = new CandleBuilder(5);
 
 // ─── Order confirmation ───────────────────────────────────────────────────────
 // RACE CONDITION FIX:
@@ -174,7 +174,7 @@ export const initFyersLiveData = async () => {
       const tickTs = msg.tt ? msg.tt * 1000 : Date.now();
       const finishedCandle = niftyCandleBuilder.build(price, tickTs);
       if (finishedCandle) {
-        console.log(`\n📦 New 3-Min Candle: ${finishedCandle.color.toUpperCase()} | Range: ${finishedCandle.range.toFixed(2)}`);
+        console.log(`\n📦 New 5-Min Candle: ${finishedCandle.color.toUpperCase()} | Range: ${finishedCandle.range.toFixed(2)}`);
         handleNewCandle(finishedCandle);
       }
     }

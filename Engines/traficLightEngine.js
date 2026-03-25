@@ -12,8 +12,10 @@ const emitLog = (msg, level = "info") => {
   if (_io) _io.emit("trade_log", { msg, level, strategy: "TRAFFIC", time: new Date().toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata" }) });
 };
 
-const RANGE_LIMIT = 30; // Max points allowed for the 2-candle setup
-const LOT_SIZE = 65;    // SEBI Lot Size
+// 1. PATTERN DETECTION (5-min timeframe, 2 opposite candles)
+const LOT_SIZE   = parseInt(process.env.NIFTY_LOT_SIZE)    || 65;  // Shares per lot
+const TRADE_LOTS = parseInt(process.env.DEFAULT_TRADE_LOTS) || 1;   // Number of lots
+const ORDER_QTY  = LOT_SIZE * TRADE_LOTS;                           // Total qty sent to broker
 
 function getISTDate() {
   return new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
@@ -25,14 +27,13 @@ function getTodayString() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 1. PATTERN DETECTION (3-min timeframe, 2 opposite candles < 30 points)
 // ─────────────────────────────────────────────────────────────────────────────
 export const handleNewCandle = (candle) => {
   const candleTime = new Date(new Date(candle.startTime).toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
 
-  // RULE: Ignore the very first 3-minute candle of the day (9:15 - 9:18 AM)
-  if (candleTime.getHours() === 9 && candleTime.getMinutes() < 18) {
-    emitLog("⏳ Skipping first 3-min candle...", "info");
+  // RULE: Ignore the very first 5-minute candle of the day (9:15 - 9:20 AM)
+  if (candleTime.getHours() === 9 && candleTime.getMinutes() < 20) {
+    emitLog("⏳ Skipping first 5-min candle...", "info");
     return;
   }
 
@@ -56,17 +57,10 @@ export const handleNewCandle = (candle) => {
   // RULE: Must be opposite colors (Traffic Light)
   if (color1 === color2) return;
 
-  // RULE: Combined range of the two candles must be < 30 points
+  // Lock the Range for Entry
   const high = Math.max(c1.high, c2.high);
   const low  = Math.min(c1.low,  c2.low);
   const totalRange = high - low;
-
-  if (totalRange >= RANGE_LIMIT) {
-    emitLog(`ℹ️ Range ${totalRange.toFixed(2)} > 30. Skipping.`, "warn");
-    return;
-  }
-
-  // Lock the Range for Entry
   tradeState.breakoutHigh = high;
   tradeState.breakoutLow  = low;
   emitLog("🎯 TRAFFIC LIGHT RANGE LOCKED!", "success");
@@ -184,7 +178,7 @@ async function enterTrade(direction, spotPrice) {
   emitLog(`🚀 Entering ${direction} at ${spotPrice} | Symbol: ${symbol}`, "success");
 
   try {
-    const orderRes = await placeOrder({ symbol, qty: LOT_SIZE, side: 1 });
+    const orderRes = await placeOrder({ symbol, qty: ORDER_QTY, side: 1 });
 
     // Wait for Fyers to confirm FILLED — returns actual avgPrice
     // throws if rejected, cancelled, or timeout
@@ -256,7 +250,7 @@ export async function exitTrade(exitSpotPrice, reason = "Manual Exit") {
   //   DELAY      — Fyers not responding (socket/REST timeout) → keep retrying every 2s here
   let exitAvgPrice = 0;
   try {
-    const exitOrder = await placeOrder({ symbol: tradeState.optionSymbol, qty: LOT_SIZE, side: -1 });
+    const exitOrder = await placeOrder({ symbol: tradeState.optionSymbol, qty: ORDER_QTY, side: -1 });
 
     // ── DELAY RETRY LOOP ────────────────────────────────────────────────────
     // If Fyers order data is delayed (socket timeout → REST timeout), keep
@@ -336,7 +330,7 @@ export async function exitTrade(exitSpotPrice, reason = "Manual Exit") {
     const points = tradeState.direction === "CE"
       ? (exitAvgPrice - tradeState.entryPrice)
       : (tradeState.entryPrice - exitAvgPrice);
-    realizedPnL = points * LOT_SIZE;
+    realizedPnL = points * ORDER_QTY;
     pnlSource   = "FILL_PRICE";
     emitLog(
       `💹 PnL from fill prices → Entry: ${tradeState.entryPrice} | Exit: ${exitAvgPrice} | PnL: ₹${realizedPnL.toFixed(2)}`,
@@ -347,7 +341,7 @@ export async function exitTrade(exitSpotPrice, reason = "Manual Exit") {
     const points = tradeState.direction === "CE"
       ? (exitSpotPrice - tradeState.entryPrice)
       : (tradeState.entryPrice - exitSpotPrice);
-    realizedPnL = points * LOT_SIZE;
+    realizedPnL = points * ORDER_QTY;
     pnlSource   = "ESTIMATED_SPOT";
     emitLog(`⚠️ PnL estimated from spot: ₹${realizedPnL.toFixed(2)}`, "warn");
   }
